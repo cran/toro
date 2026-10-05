@@ -1,7 +1,17 @@
-#' Check if Chrome/Chromium is available for webshot operations
+#' Check if Chrome or a Chromium-based browser is available
 #'
-#' @return `TRUE` if Chrome is available, `FALSE` otherwise.
-#' @keywords internal
+#' Determines whether a Chrome/Chromium executable can be located, either via
+#' the `CHROMOTE_CHROME` environment variable or one of several common
+#' installation paths for macOS, Linux, and Windows. This is used to decide
+#' whether [export_map_image()] can render map images, since the underlying
+#' webshot packages require a Chromium-based browser to take screenshots.
+#'
+#' @return A single logical value: `TRUE` if a Chrome/Chromium executable was
+#'   found, `FALSE` otherwise.
+#' @export
+#'
+#' @examples
+#' check_chrome_available()
 check_chrome_available <- function() {
   # Check if CHROMOTE_CHROME environment variable is set
   chrome_env <- Sys.getenv("CHROMOTE_CHROME", unset = "")
@@ -16,7 +26,10 @@ check_chrome_available <- function() {
     "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser", # macOS Brave
     "/usr/bin/google-chrome", # Linux
     "/usr/bin/chromium-browser", # Linux
-    "/usr/bin/brave-browser" # Linux Brave
+    "/usr/bin/brave-browser", # Linux Brave
+    "C:/Program Files/Google/Chrome/Application/chrome.exe", # Windows
+    "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe", # Windows 32-bit
+    "C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe" # Windows Brave
   )
 
   # Check if any of the common paths exist
@@ -70,16 +83,18 @@ chrome_error_message <- function() {
 #'
 #' @examples
 #' \donttest{
-#' # Load library
-#' library(sf)
+#' if (check_chrome_available()) {
+#'   # Load library
+#'   library(sf)
 #'
-#' data <- data.frame(lon = 174.8210, lat = -41.3096) |>
-#'   sf::st_as_sf(coords = c("lon", "lat"), crs = 4326)
-#' # Create and export a map
-#' my_map <- map() |>
-#'   add_circle_layer("epi_circle", source = data)
+#'   data <- data.frame(lon = 174.8210, lat = -41.3096) |>
+#'     sf::st_as_sf(coords = c("lon", "lat"), crs = 4326)
+#'   # Create and export a map
+#'   my_map <- map() |>
+#'     add_circle_layer("epi_circle", source = data)
 #'
-#' export_map_image(my_map, file.path(tempdir(), "my_map.png"), width = 1200, height = 800)
+#'   export_map_image(my_map, file.path(tempdir(), "my_map.png"), width = 1200, height = 800)
+#' }
 #' }
 export_map_image <- function(
   map,

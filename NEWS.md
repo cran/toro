@@ -1,3 +1,17 @@
+# toro 0.2.0 (2026-09-29)
+
+- Updated package maintainer and author roles
+- Revised package documentation
+- Minor improvements and fixes
+- Implemented package foundation for future development
+
+# toro 0.1.1 (2026-05-13)
+
+## Bug fixes and improvements
+
+- Temporarily added a coming soon page to the docs
+- Fixed a bug where adding the source inside an add layer function did not always work
+
 # toro 0.1.0 (2026-04-28)
 
 ## Bug fixes and improvements

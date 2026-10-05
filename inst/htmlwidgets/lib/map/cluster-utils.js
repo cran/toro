@@ -105,7 +105,7 @@ function addClusterLayer(el, layerId, sourceId, popupColumn, canCluster, cluster
         ...clusterOptions?.circleOptions?.layout,
       },
     },
-    layerId
+    layerId,
   );
 
   // Add a symbol layer for cluster counts
@@ -124,7 +124,7 @@ function addClusterLayer(el, layerId, sourceId, popupColumn, canCluster, cluster
         ...clusterOptions?.textOptions?.paint,
       },
     },
-    layerId
+    layerId,
   );
   el.ourLayers.push(`${layerId}-cluster-count`);
   el.ourLayers.push(`${layerId}-clusters`);
@@ -162,19 +162,17 @@ function addClusterSpiderfying(el, layerId, sourceId, popupColumn, clusterOption
     });
     if (features.length === 0) {
       // Click was NOT on any of the spiderfyLayers - close any open spiderfy
-      closeSpiderfy(el.mapInstance);
-      el.openClusterId = null;
+      closeSpiderfy(el);
     }
   });
   el.mapInstance.on('click', `${layerId}-clusters`, (e) => {
-    onClusterClick(e, el, layerId, sourceId, clusterOptions?.spiderfyOptions || {});
+    onClusterClick(e, el, layerId, sourceId, clusterOptions || {});
   });
 
   // When a zoom is started, close any open spiderfy
   el.mapInstance.on('zoomstart', function () {
     if (el.openClusterId) {
-      closeSpiderfy(el.mapInstance); // Close any open cluster when zooming starts
-      el.openClusterId = null; // Reset the open cluster ID
+      closeSpiderfy(el); // Close any open cluster when zooming starts
     }
   });
 
@@ -223,20 +221,37 @@ function addSpiderfyingLayers(el) {
  * @param {object} map MapLibre map instance.
  * @param {object[]} features Cluster features to spiderfy.
  * @param {number[]} centerLngLat Cluster center coordinates as [lng, lat].
- * @param {number} [baseRadiusPx=50] Initial radius in pixels for the spiderfy circles.
- * @param {number} [spacing=40] Distance in pixels between points in the spiral.
- * @param {number} [maxCircleCount=10] Max number of points to have in a circle before switching
- *   to a spiral pattern.
+ * @param {object} [options={}] Optional spiderfy options to configure spiderfying behavior.
+ * @param {string} [options.orderKey] Optional property key to order the features by before
+ *   spiderfying.
+ * @param {string} [options.orderDirection='asc'] Optional order direction ('asc' or 'desc') for
+ *   ordering features.
+ * @param {number} [options.baseRadiusPx=50] Initial radius in pixels for the spiderfy circles.
+ * @param {number} [options.spacing=40] Distance in pixels between points in the spiral.
+ * @param {number} [options.maxCircleCount=10] Max number of points to have in a circle before
+ *   switching to a spiral pattern.
  * @returns {object[]} Cluster features with updated coordinates for spiderfying.
  */
-function getSpiderfiedFeatures(
-  map,
-  features,
-  centerLngLat,
-  baseRadiusPx = 50,
-  spacing = 40,
-  maxCircleCount = 10
-) {
+function getSpiderfiedFeatures(map, features, centerLngLat, options = {}) {
+  const {
+    baseRadiusPx = 50,
+    spacing = 40,
+    maxCircleCount = 10,
+    orderKey,
+    orderDirection = 'asc',
+  } = options;
+  if (orderKey) {
+    features = features?.sort((a, b) => {
+      const aOrderVal = a.properties?.[orderKey];
+      const bOrderVal = b.properties?.[orderKey];
+      const beforeVal = orderDirection === 'asc' ? -1 : 1;
+      const afterVal = orderDirection === 'asc' ? 1 : -1;
+      if (aOrderVal == null) return 1;
+      if (bOrderVal == null) return -1;
+
+      return aOrderVal < bOrderVal ? beforeVal : aOrderVal > bOrderVal ? afterVal : 0; // Sort both number or strings
+    });
+  }
   const center = map.project(centerLngLat);
   const result = [];
   const total = features.length;
@@ -309,7 +324,8 @@ function getSpiderfyLines(center, features) {
  * @param {object} el HTML widget element containing the map instance.
  * @param {string} layerId  Layer ID that the clusters belong to.
  * @param {string} sourceId Source ID of the cluster.
- * @param {object} spiderfyOptions Spiderfy options to configure spiderfying behavior.
+ * @param {object} clusterOptions Cluster options to configure cluster behavior. This includes the
+ *   `spiderfyOptions` object for customising spiderfying.
  * @returns {void}
  *
  * @see {@link closeSpiderfy}
@@ -317,8 +333,9 @@ function getSpiderfyLines(center, features) {
  * @see {@link getSpiderfyLines}
  * @see {@link copyLayerStyle}
  */
-async function onClusterClick(e, el, layerId, sourceId, spiderfyOptions) {
-  closeSpiderfy(el.mapInstance); // Close any open cluster before opening a new one
+async function onClusterClick(e, el, layerId, sourceId, clusterOptions) {
+  const spiderfyOptions = clusterOptions?.spiderfyOptions || {};
+  closeSpiderfy(el); // Close any open cluster before opening a new one
 
   // Get the cluster that was clicked
   const features = el.mapInstance.queryRenderedFeatures(e.point, {
@@ -328,8 +345,11 @@ async function onClusterClick(e, el, layerId, sourceId, spiderfyOptions) {
 
   const maxSpiderfyPins =
     spiderfyOptions?.maxSpiderfyPins || el.clusterOptions.spiderfyOptions?.maxSpiderfyPins;
+  const zoomOnClick = clusterOptions?.zoomOnClick
+    ? clusterOptions?.zoomOnClick
+    : el.clusterOptions.zoomOnClick;
   // Cluster clicked on max zoom - toggle spiderfy
-  if (el.mapInstance.getZoom() >= el.maxZoom) {
+  if (el.mapInstance.getZoom() >= el.maxZoom || zoomOnClick === false) {
     if (el.openClusterId === clusterId) {
       el.openClusterId = null; // Click was to close spiderfy
       return;
@@ -346,7 +366,11 @@ async function onClusterClick(e, el, layerId, sourceId, spiderfyOptions) {
     const spiderfiedFeatures = getSpiderfiedFeatures(
       el.mapInstance,
       clusterFeatures,
-      clusterCoords
+      clusterCoords,
+      {
+        orderKey: clusterOptions.orderKey || el.clusterOptions.orderKey,
+        orderDirection: clusterOptions.orderDirection || el.clusterOptions.orderDirection,
+      },
     );
     // Get the lines between the spiderfied points
     const spiderfyLines = getSpiderfyLines(clusterCoords, spiderfiedFeatures);
@@ -445,10 +469,16 @@ function toggleLayerClustering(map, layerId, enable) {
 /**
  * Clear the spiderfy layer data to close any open spiderfy clusters.
  *
- * @param {object} map MapLibre map instance.
+ * @param {object} el toro element instance.
  * @returns {void}
  */
-function closeSpiderfy(map) {
+function closeSpiderfy(el) {
+  const map = el.mapInstance;
+  // Hide any open spiderfy popup
+  if (map._popup) {
+    map._popup.remove();
+    map._popup = null;
+  }
   map.getSource('spiderfy-pins-source').setData({
     type: 'FeatureCollection',
     features: [],
@@ -457,9 +487,5 @@ function closeSpiderfy(map) {
     type: 'FeatureCollection',
     features: [],
   });
-  // Hide any open spiderfy popup
-  if (map._popup) {
-    map._popup.remove();
-    map._popup = null;
-  }
+  el.openClusterId = null;
 }

@@ -44,6 +44,50 @@
   gap: 4px;
 }
 
+.toro-paint-control,
+.toro-legend-control {
+  background: #ffffff;
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+  color: #1f2937;
+  font-size: 12px;
+  min-width: 140px;
+  max-width: 220px;
+  padding: 8px 10px;
+}
+
+.toro-legend-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.toro-legend-item {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  margin: 3px 0;
+}
+
+.toro-legend-swatch {
+  border: 1px solid rgba(0, 0, 0, 0.2);
+  border-radius: 2px;
+  display: inline-block;
+  flex: 0 0 14px;
+  height: 14px;
+}
+
+.toro-legend-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toro-legend-meta {
+  color: #6b7280;
+  font-size: 11px;
+  margin-top: 6px;
+}
+
 .animation-controls-group {
   display: flex;
   flex-direction: column;
@@ -495,9 +539,9 @@ input {
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  min-width: 200px;
   max-width: 100%;
   pointer-events: auto !important;
+  overflow: hidden;
 }
 
 .control-panel .panel-header {
@@ -515,7 +559,6 @@ input {
   font-size: 12px;
   cursor: pointer;
   padding: 2px 6px;
-  margin-right: 8px;
   border-radius: 3px;
   transition: background-color 0.2s;
 }
@@ -524,11 +567,17 @@ input {
   background: rgba(0, 0, 0, 0.1);
 }
 
+.panel-collapse-btn:not(.collapsed) .collapsed-icon,
+.panel-collapse-btn.collapsed .open-icon {
+  display: none;
+}
+
 .control-panel .panel-title {
   font-weight: 600;
   font-size: 14px;
   color: #333;
   flex: 1;
+  margin-left: 8px;
 }
 
 .control-panel .panel-content {
@@ -669,4 +718,28 @@ input {
 .toro-export-control,
 .toro-export-list {
   display: none;
+}
+
+.toro-paint-control .paint-control-label {
+  font-weight: bold;
+}
+
+.paint-control-select select {
+  background-color: transparent;
+  border: 1px solid black;
+  padding: 3px 5px;
+  cursor: pointer;
+}
+
+.paint-control-radio {
+  display: flex;
+  flex-direction: column;
+}
+
+.paint-control-radio .paint-control-radio-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  cursor: pointer;
 }

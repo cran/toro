@@ -28,6 +28,8 @@ const validDrawModes = ['polygon', 'delete', 'line', 'point']; // Accepted draw 
  * @param {object} modeLabels A named list of labels for each mode.
  *   For example, `{ polygon: "Draw Polygon", delete: "Delete Shape" }
  * @param {string} controlId Optional custom control ID. If not provided, uses default pattern.
+ * @param {object|object[]} features Optional GeoJSON Feature or FeatureCollection (or array of Features)
+ *   to pre-populate the draw control with on initialisation.
  * @returns {void}
  */
 function addDrawControl(
@@ -37,7 +39,8 @@ function addDrawControl(
   activeColour,
   inactiveColour,
   modeLabels,
-  controlId = null
+  controlId = null,
+  features = null,
 ) {
   modes = modes.flat ? modes.flat() : [].concat(...modes);
   modes = modes.filter((mode) => validDrawModes.includes(mode));
@@ -70,7 +73,7 @@ function addDrawControl(
       {
         static: StaticMode,
       },
-      MapboxDraw.modes
+      MapboxDraw.modes,
     ),
   });
 
@@ -82,6 +85,25 @@ function addDrawControl(
   el.draw = draw;
   el.drawControlId = drawControlId;
   el.mapInstance.addControl(draw, position);
+
+  // Pre-populate with any supplied features once the control is ready
+  if (features) {
+    setTimeout(() => {
+      try {
+        // Accept a FeatureCollection, a single Feature, or an array of Features
+        if (Array.isArray(features)) {
+          draw.add({ type: 'FeatureCollection', features });
+        } else if (features.type === 'FeatureCollection') {
+          draw.add(features);
+        } else {
+          draw.add(features); // single Feature
+        }
+        updateAllDrawnFeatures(el.widgetInstance);
+      } catch (e) {
+        console.warn('addDrawControl: failed to add pre-drawn features', e);
+      }
+    }, 0);
+  }
 
   // Add the ID to the draw control container after it's added to the DOM
   setTimeout(() => {
@@ -104,6 +126,28 @@ function addDrawControl(
           controlBtn.innerHTML = label; // Set the button label if provided
           controlBtn.style.backgroundImage = 'none'; // Remove default background image
         }
+
+        // Override trash button to handle direct_select mode.
+        // In direct_select mode (after double-clicking to edit vertices), MapboxDraw
+        // exits the mode instead of deleting the feature, firing draw.selectionchange
+        // rather than draw.delete. Intercept the click to force deletion in that case.
+        if (mode === 'delete') {
+          controlBtn.addEventListener(
+            'click',
+            function (e) {
+              if (el.draw.getMode() === 'direct_select') {
+                e.stopImmediatePropagation();
+                const selectedIds = el.draw.getSelectedIds();
+                if (selectedIds.length > 0) {
+                  const features = selectedIds.map((id) => el.draw.get(id)).filter(Boolean);
+                  el.draw.delete(selectedIds);
+                  el.mapInstance.fire('draw.delete', { features });
+                }
+              }
+            },
+            true, // Capture phase — runs before MapboxDraw's own listener
+          );
+        }
       }
     }, 0);
   });
@@ -113,9 +157,8 @@ function addDrawControl(
     el.mapInstance.on('draw.create', function (e) {
       const feature = e.features[0]; // The drawn feature
       const geojson = JSON.stringify(feature);
-      Shiny.setInputValue(el.id + '_shape_created', geojson, {
-        priority: 'event',
-      });
+      updateShiny(el.id + '_shape_created', geojson);
+      updateAllDrawnFeatures(el.widgetInstance);
       /**
        * Change mode to static after a short delay to avoid recursion.
        * Stops shapes from being editable after creation, but only if
@@ -130,9 +173,11 @@ function addDrawControl(
 
     // Trigger Shiny input when a feature is deleted
     el.mapInstance.on('draw.delete', function (e) {
-      Shiny.setInputValue(el.id + '_shape_deleted', e.features.id, {
-        priority: 'event',
-      });
+      const deletedIds = (e.features || []).map((feature) => feature.id).filter(Boolean);
+      if (deletedIds.length > 0) {
+        updateShiny(el.id + '_shape_deleted', deletedIds.length === 1 ? deletedIds[0] : deletedIds);
+      }
+      updateAllDrawnFeatures(el.widgetInstance);
     });
 
     // Store updated features to send to Shiny when selection changes
@@ -143,9 +188,7 @@ function addDrawControl(
       if (pendingUpdatedFeatures.length > 0) {
         pendingUpdatedFeatures.forEach((feature) => {
           const geojson = JSON.stringify(feature);
-          Shiny.setInputValue(el.id + '_shape_updated', geojson, {
-            priority: 'event',
-          });
+          updateShiny(el.id + '_shape_updated', geojson);
         });
         pendingUpdatedFeatures = []; // Clear pending updates
       }
@@ -157,6 +200,7 @@ function addDrawControl(
       e.features.forEach((feature) => {
         pendingUpdatedFeatures.push(feature);
       });
+      updateAllDrawnFeatures(el.widgetInstance);
     });
 
     el.mapInstance.on('click', function (e) {
@@ -540,7 +584,7 @@ function toggleControl(el, controlId, show) {
 
   if (controlId == 'zoom_control') {
     var buttons = el.querySelector(
-      '.maplibregl-ctrl-group .maplibregl-ctrl-zoom-in, .maplibregl-ctrl-group .maplibregl-ctrl-zoom-out, .maplibregl-ctrl-group .maplibregl-ctrl-compass'
+      '.maplibregl-ctrl-group .maplibregl-ctrl-zoom-in, .maplibregl-ctrl-group .maplibregl-ctrl-zoom-out, .maplibregl-ctrl-group .maplibregl-ctrl-compass',
     );
     if (buttons) {
       control = buttons.parentElement;
@@ -789,25 +833,34 @@ function addControlPanel(el, panelId, options = {}) {
   const title = options.title;
   const showTitle = title && options.showTitle !== false;
   const collapsible = options.collapsible || false;
-  const collapsed = options.collapsed || false;
   const direction = options.direction || 'column';
+  const {
+    collapsed = false,
+    collapseVertically = true,
+    openIcon = '\u25BC',
+    collapsedIcon = '\u25B2',
+  } = options.collapseConfig || {};
+
+  // Render a header whenever we need either the title or the collapse toggle.
+  const showHeader = showTitle || collapsible;
 
   // Generate collapse button if collapsible
   const collapseButton = collapsible
-    ? `<button class="panel-collapse-btn" id="${panelId}-collapse-btn">${
-        collapsed ? '▶' : '▼'
-      }</button>`
+    ? `<button class="panel-collapse-btn ${collapsed ? 'collapsed' : ''}" id="${panelId}-collapse-btn">
+    <span class="collapsed-icon">${collapsedIcon}</span>
+    <span class="open-icon">${openIcon}</span>
+    </button>`
     : '';
 
   // HTML for the control panel container
   const html = `
-    <div class="control-panel direction-${direction}" id="${panelId}-panel">
+    <div class="control-panel direction-${direction} collapse-direction-${collapseVertically ? 'vertical' : 'horizontal'}" id="${panelId}-panel">
       ${
-        showTitle
+        showHeader
           ? `
         <div class="panel-header">
           ${collapseButton}
-          <div class="panel-title">${title}</div>
+          ${showTitle ? `<div class="panel-title">${title}</div>` : ''}
         </div>
       `
           : ''
@@ -836,7 +889,11 @@ function addControlPanel(el, panelId, options = {}) {
 
           const isCollapsed = panelContent.style.display === 'none';
           panelContent.style.display = isCollapsed ? 'flex' : 'none';
-          collapseBtn.textContent = isCollapsed ? '▼' : '▶';
+          if (isCollapsed) {
+            collapseBtn.classList.remove('collapsed');
+          } else {
+            collapseBtn.classList.add('collapsed');
+          }
         });
       }
     }, 100);
@@ -868,7 +925,7 @@ function addControlPanel(el, panelId, options = {}) {
       controlId = null,
       sectionTitle = null,
       panelClass = null,
-      groupId = null
+      groupId = null,
     ) {
       // If groupId is specified, add control to the group instead
       if (groupId) {
@@ -908,7 +965,7 @@ function addControlPanel(el, panelId, options = {}) {
       controlId = null,
       sectionTitle = null,
       panelClass = null,
-      groupId
+      groupId,
     ) {
       const groupElement = el.querySelector(`#${groupId}`);
       if (!groupElement) {
@@ -960,18 +1017,14 @@ function addControlPanel(el, panelId, options = {}) {
     },
     collapse: function () {
       const panelContent = el.querySelector(`#${panelId}-content`);
-      const collapseBtn = el.querySelector(`#${panelId}-collapse-btn`);
       if (panelContent) {
         panelContent.style.display = 'none';
-        if (collapseBtn) collapseBtn.textContent = '▶';
       }
     },
     expand: function () {
       const panelContent = el.querySelector(`#${panelId}-content`);
-      const collapseBtn = el.querySelector(`#${panelId}-collapse-btn`);
       if (panelContent) {
         panelContent.style.display = 'flex';
-        if (collapseBtn) collapseBtn.textContent = '▼';
       }
     },
   };
@@ -990,7 +1043,7 @@ function addControlPanel(el, panelId, options = {}) {
         customControl.html,
         customControl.id || null,
         customControl.title || null,
-        'toro-custom-panel-control'
+        'toro-custom-panel-control',
       );
     });
   }
@@ -1013,7 +1066,7 @@ function addHtmlToPanel(
   htmlContent,
   sectionTitle = null,
   controlId = null,
-  groupId = null
+  groupId = null,
 ) {
   const map = widgetInstance.getMap();
   const panel = map._controlPanels && map._controlPanels[panelId];
@@ -1083,7 +1136,7 @@ function addControlToPanel(el, panelId, controlConfig) {
           customControlId,
           sectionTitle,
           'toro-custom-panel-control',
-          groupId
+          groupId,
         );
       }
       break;
@@ -1184,7 +1237,7 @@ function addCursorCoordinateControlToPanel(widgetInstance, panelId, options, sec
     html,
     `cursor-coords-${widgetInstance.getId()}`,
     sectionTitle,
-    'toro-cursor-coords-panel-control'
+    'toro-cursor-coords-panel-control',
   );
 
   // Add mouse move listener
@@ -1256,7 +1309,7 @@ function addZoomControlToPanel(widgetInstance, panelId, options, sectionTitle) {
     html,
     `zoom-control-${widgetInstance.getId()}`,
     sectionTitle,
-    'toro-zoom-panel-control'
+    'toro-zoom-panel-control',
   );
 
   // Add event listeners
@@ -1322,7 +1375,8 @@ function addDrawControlToPanel(el, panelId, options, sectionTitle) {
       options.activeColour || '#007cbf',
       options.inactiveColour || '#999999',
       options.modeLabels || {},
-      options.controlId
+      options.controlId,
+      options.features || null,
     );
 
     // Hide the default MapboxDraw control UI since we're using panel buttons
@@ -1332,7 +1386,7 @@ function addDrawControlToPanel(el, panelId, options, sectionTitle) {
       if (
         drawControls &&
         drawControls.querySelector(
-          '.mapbox-gl-draw_polygon, .mapbox-gl-draw_trash, .mapbox-gl-draw_line'
+          '.mapbox-gl-draw_polygon, .mapbox-gl-draw_trash, .mapbox-gl-draw_line',
         )
       ) {
         drawControls.style.display = 'none';
@@ -1361,7 +1415,7 @@ function addDrawControlToPanel(el, panelId, options, sectionTitle) {
     html,
     `draw-control-${widgetInstance.getId()}`,
     sectionTitle,
-    'toro-draw-panel-control'
+    'toro-draw-panel-control',
   );
 
   // Add event listeners to make the buttons functional
@@ -1416,27 +1470,28 @@ function addDrawControlToPanel(el, panelId, options, sectionTitle) {
         map.on('draw.create', function (e) {
           const feature = e.features[0];
           const geojson = JSON.stringify(feature);
-          Shiny.setInputValue(mapElement.id + '_shape_created', geojson, {
-            priority: 'event',
-          });
+          updateShiny(mapElement.id + '_shape_created', geojson);
+          updateAllDrawnFeatures(el.widgetInstance);
         });
 
         // Trigger Shiny input when a feature is deleted
         map.on('draw.delete', function (e) {
-          const feature = e.features[0];
-          const geojson = JSON.stringify(feature);
-          Shiny.setInputValue(mapElement.id + '_shape_deleted', geojson, {
-            priority: 'event',
-          });
+          const deletedIds = (e.features || []).map((feature) => feature.id).filter(Boolean);
+          if (deletedIds.length > 0) {
+            updateShiny(
+              mapElement.id + '_shape_deleted',
+              deletedIds.length === 1 ? deletedIds[0] : deletedIds,
+            );
+            updateAllDrawnFeatures(el.widgetInstance);
+          }
         });
 
         // Trigger Shiny input when a feature is updated
         map.on('draw.update', function (e) {
           const feature = e.features[0];
           const geojson = JSON.stringify(feature);
-          Shiny.setInputValue(mapElement.id + '_shape_updated', geojson, {
-            priority: 'event',
-          });
+          updateShiny(mapElement.id + '_shape_updated', geojson);
+          updateAllDrawnFeatures(el.widgetInstance);
         });
       }
     }
@@ -1504,7 +1559,7 @@ function addTimelineControl(
   endDate,
   onPlayPause,
   onSliderChange,
-  options = {}
+  options = {},
 ) {
   const map = widgetInstance.getMap();
   // Format dates as needed
@@ -1587,10 +1642,24 @@ function addTimelineControl(
   const sliderId = `timeline-slider-${mapId}`;
   const controlId = `timeline-control-${mapId}`;
 
+  // Resolve custom icons and text for play/pause button
+  const icons = options.icons || {};
+  const buttonText = options.buttonText || {};
+  const timelinePlayIcon = icons.play ? renderIcon(icons.play) : '▶';
+  const timelinePauseIcon = icons.pause ? renderIcon(icons.pause) : '⏸';
+  const timelinePlayText = 'play' in buttonText ? buttonText.play : '';
+  const timelinePauseText = 'pause' in buttonText ? buttonText.pause : '';
+
   // HTML for the control
   const html = `
     <div class="timeline-control-container">
-      <button id="${playPauseId}" class="timeline-play-btn">▶</button>
+      <button id="${playPauseId}" class="timeline-play-btn"
+              data-play-icon="${timelinePlayIcon.replace(/"/g, '&quot;')}"
+              data-pause-icon="${timelinePauseIcon.replace(/"/g, '&quot;')}"
+              data-play-text="${timelinePlayText}"
+              data-pause-text="${timelinePauseText}">
+        <span class="button-icon">${timelinePlayIcon}</span>${timelinePlayText ? `<span class="button-text">${timelinePlayText}</span>` : ''}
+      </button>
       <div class="timeline-axis-container">
         <!-- Current date display above slider - always visible -->
         <div id="${currentDateId}">${start}</div>
@@ -1620,7 +1689,7 @@ function addTimelineControl(
       timelineContainerId,
       options.panelTitle,
       'toro-timeline-panel-control',
-      groupId
+      groupId,
     );
   } else {
     // Add as standalone control
@@ -1668,7 +1737,15 @@ function addTimelineControl(
 
     playing = !playing;
     if (playPauseBtn) {
-      playPauseBtn.innerHTML = playing ? '⏸' : '▶';
+      const iconHtml = playing ? timelinePauseIcon : timelinePlayIcon;
+      const textHtml = playing
+        ? timelinePauseText
+          ? `<span class="button-text">${timelinePauseText}</span>`
+          : ''
+        : timelinePlayText
+          ? `<span class="button-text">${timelinePlayText}</span>`
+          : '';
+      playPauseBtn.innerHTML = `<span class="button-icon">${iconHtml}</span>${textHtml}`;
     }
 
     // Disable/enable slider based on play state
@@ -1705,7 +1782,7 @@ function addTimelineControl(
 
     const currentDate = new Date(
       currentStartDate.getTime() +
-        progress * (currentEndDate.getTime() - currentStartDate.getTime())
+        progress * (currentEndDate.getTime() - currentStartDate.getTime()),
     );
     const currentDateDisplay = document.getElementById(currentDateId);
 
@@ -1865,7 +1942,15 @@ function addTimelineControl(
     setPlaying: function (isPlaying) {
       playing = isPlaying;
       if (playPauseBtn) {
-        playPauseBtn.innerHTML = playing ? '⏸' : '▶';
+        const iconHtml = playing ? timelinePauseIcon : timelinePlayIcon;
+        const textHtml = playing
+          ? timelinePauseText
+            ? `<span class="button-text">${timelinePauseText}</span>`
+            : ''
+          : timelinePlayText
+            ? `<span class="button-text">${timelinePlayText}</span>`
+            : '';
+        playPauseBtn.innerHTML = `<span class="button-icon">${iconHtml}</span>${textHtml}`;
       }
       if (timelineSlider) {
         timelineSlider.disabled = playing;
@@ -1898,7 +1983,7 @@ function addTimelineControl(
 
       // Rebuild axis ticks with new date range
       const axisContainer = document.querySelector(
-        `#${timelineContainerId} .timeline-axis-container`
+        `#${timelineContainerId} .timeline-axis-container`,
       );
       if (axisContainer) {
         // Remove existing ticks
@@ -2041,7 +2126,7 @@ function addSpeedControl(widgetInstance, onSpeedChange, options = {}) {
       speedControlId,
       options.panelTitle,
       'toro-speed-panel-control',
-      groupId
+      groupId,
     );
   } else {
     // Add as standalone control
@@ -2486,7 +2571,7 @@ function generateToggleInputHtml(
   initialState,
   mapId,
   useInlineHandler = false,
-  includeWrapper = false
+  includeWrapper = false,
 ) {
   const dataAttribute = type === 'cluster' ? 'data-clustered' : 'data-visible';
 
@@ -2544,7 +2629,7 @@ function addClusterToggleControl(
   rightLabel = null,
   initialState = false,
   position = 'top-right',
-  widgetInstance = null
+  widgetInstance = null,
 ) {
   // Generate proper namespaced ID if widgetInstance is available
   const finalControlId = widgetInstance ? `${controlId}-${widgetInstance.getId()}` : controlId;
@@ -2564,7 +2649,7 @@ function addClusterToggleControl(
         rightLabel,
         initialState,
         mapId,
-        false
+        false,
       );
       this._container.innerHTML = buttonHtml;
 
@@ -2660,7 +2745,7 @@ function addVisibilityToggleControl(
   rightLabel = '',
   initialState = true,
   position = 'top-right',
-  widgetInstance = null
+  widgetInstance = null,
 ) {
   // Generate proper namespaced ID if widgetInstance is available
   const finalControlId = widgetInstance ? `${controlId}-${widgetInstance.getId()}` : controlId;
@@ -2680,7 +2765,7 @@ function addVisibilityToggleControl(
         rightLabel,
         initialState,
         mapId,
-        false
+        false,
       );
       this._container.innerHTML = buttonHtml;
 
@@ -2801,7 +2886,7 @@ function addClusterToggleControlToPanel(widgetInstance, panelId, options, sectio
     initialState,
     widgetInstance.getId(),
     true, // Use inline onclick handler for panels
-    true // Include wrapper div with control classes
+    true, // Include wrapper div with control classes
   );
 
   // Add to panel (include groupId from options)
@@ -2811,7 +2896,7 @@ function addClusterToggleControlToPanel(widgetInstance, panelId, options, sectio
     controlId,
     sectionTitle,
     'toro-cluster-toggle-panel-control',
-    groupId
+    groupId,
   );
 }
 
@@ -2847,7 +2932,7 @@ function addVisibilityToggleControlToPanel(widgetInstance, panelId, options, sec
     initialState,
     widgetInstance.getId(),
     true, // Use inline onclick handler for panels
-    true // Include wrapper div with control classes
+    true, // Include wrapper div with control classes
   );
 
   // Add to panel
@@ -2877,18 +2962,27 @@ function addControlGroup(el, panelId, groupConfig) {
   const groupId = groupConfig.groupId;
   const groupTitle = groupConfig.groupTitle || 'Control Group';
   const collapsible = groupConfig.collapsible !== false;
-  const collapsed = groupConfig.collapsed === true;
+  // const collapsed = groupConfig.collapsed === true;
+  const {
+    collapsed = false,
+    collapseVertically = true,
+    openIcon = '\u25BC',
+    collapsedIcon = '\u25B2',
+  } = groupConfig.collapseConfig || {};
 
   // Create the group HTML structure
   const groupHTML = `
-    <div class="control-group ${collapsed ? 'collapsed' : ''}" id="${groupId}">
+    <div class="control-group ${collapsed ? 'collapsed' : ''} collapse-direction-${collapseVertically ? 'vertical' : 'horizontal'}" id="${groupId}">
       <div class="control-group-header ${collapsible ? 'collapsible' : ''}" ${
         collapsible ? 'onclick="toggleControlGroup(\'' + groupId + '\')"' : ''
       }>
         <span class="control-group-title">${groupTitle}</span>
         ${
           collapsible
-            ? '<span class="control-group-toggle">' + (collapsed ? '▶' : '▼') + '</span>'
+            ? `<span class="control-group-toggle ${collapsed ? 'collapsed' : ''}">
+            <span class="collapsed-icon">${collapsedIcon}</span>
+            <span class="open-icon">${openIcon}</span>
+            </span>`
             : ''
         }
       </div>
@@ -2943,12 +3037,12 @@ function toggleControlGroup(groupId) {
     // Expand the group
     groupElement.classList.remove('collapsed');
     contentElement.classList.remove('hidden');
-    if (toggleElement) toggleElement.textContent = '▼';
+    toggleElement.classList.add('collapsed');
   } else {
     // Collapse the group
     groupElement.classList.add('collapsed');
     contentElement.classList.add('hidden');
-    if (toggleElement) toggleElement.textContent = '▶';
+    toggleElement.classList.remove('collapsed');
   }
 }
 
@@ -3108,25 +3202,19 @@ function addLayerSelectorControl(widgetInstance, onLayerChange, options = {}) {
       map.setLayoutProperty(selectedLayer, 'visibility', 'visible');
     }
 
+    syncAllLegendVisibility(map);
+
     // Call the callback with the selected layer
     if (typeof onLayerChange === 'function') {
       onLayerChange(selectedLayer, previousLayer);
     }
 
     // Trigger Shiny event if in Shiny mode
-    if (HTMLWidgets.shinyMode) {
-      Shiny.setInputValue(
-        el.id + '_layer_selected',
-        {
-          selected: selectedLayer,
-          previous: previousLayer,
-          timestamp: new Date().getTime(),
-        },
-        {
-          priority: 'event',
-        }
-      );
-    }
+    updateShiny(el.id + '_layer_selected', {
+      selected: selectedLayer,
+      previous: previousLayer,
+      timestamp: new Date().getTime(),
+    });
   };
 
   /**
@@ -3185,6 +3273,7 @@ function addLayerSelectorControl(widgetInstance, onLayerChange, options = {}) {
         }
       });
     }
+    syncAllLegendVisibility(map);
   }
 
   setupEventHandlers();
@@ -3218,6 +3307,8 @@ function addLayerSelectorControl(widgetInstance, onLayerChange, options = {}) {
         if (layerId && map.getLayer(layerId)) {
           map.setLayoutProperty(layerId, 'visibility', 'visible');
         }
+
+        syncAllLegendVisibility(map);
 
         if (typeof onLayerChange === 'function') {
           onLayerChange(currentLayer, previousLayer);
@@ -3317,6 +3408,24 @@ function addLayerSelectorControlToPanel(widgetInstance, panelId, options, sectio
  *     - settings: object - Additional settings
  * @returns {void}
  */
+
+/**
+ * Render an icon value as HTML.
+ * - SVG strings are inlined directly.
+ * - Data URIs (e.g. base64-encoded PNG) are rendered as <img>.
+ * - Everything else is treated as plain text.
+ *
+ * @param {string} value The icon value to render.
+ * @returns {string} HTML string.
+ */
+function renderIcon(value) {
+  if (!value) return '';
+  if (value.trimStart().startsWith('<svg')) return value;
+  if (value.startsWith('data:'))
+    return `<img src="${value}" alt="" style="height:1em;vertical-align:middle;">`;
+  return value;
+}
+
 function addAnimationControlButton(widgetInstance, options = {}) {
   const map = widgetInstance.getMap();
   const el = widgetInstance.getElement();
@@ -3326,6 +3435,8 @@ function addAnimationControlButton(widgetInstance, options = {}) {
   const position = options.position || 'top-right';
   const panelId = options.panelId || null;
   const buttons = options.buttons || ['play', 'pause'];
+  const icons = options.icons || {};
+  const buttonText = options.buttonText || {};
   const includeSpeedControl = options.includeSpeedControl || false;
   const speedValues = options.speedValues || [0.5, 1, 2];
   const speedLabels = options.speedLabels || ['Slow', 'Normal', 'Fast'];
@@ -3334,36 +3445,44 @@ function addAnimationControlButton(widgetInstance, options = {}) {
   // Generate unique IDs
   const controlGroupId = `animation-controls-${widgetInstance.getId()}`;
 
+  // Resolve custom icons (falling back to defaults)
+  const playIcon = icons.play ? renderIcon(icons.play) : '▶';
+  const playText = buttonText.play || '';
+  const pauseIcon = icons.pause ? renderIcon(icons.pause) : '⏸';
+  const pauseText = buttonText.pause || '';
+  const stopIcon = icons.stop ? renderIcon(icons.stop) : '⏹';
+  const stopText = buttonText.stop || '';
+
   // Create button configurations with play/pause toggle support
   const buttonConfigs = {
     play: {
       id: `play-pause-button-${widgetInstance.getId()}`,
-      text: 'Play',
-      icon: '▶',
+      text: playText,
+      icon: playIcon,
       action: 'play',
       color: '#007cba',
       isPlaying: false,
     },
     pause: {
       id: `play-pause-button-${widgetInstance.getId()}`,
-      text: 'Play', // Will be handled by toggle logic
-      icon: '▶',
+      text: pauseText, // Will be handled by toggle logic
+      icon: playIcon,
       action: 'play',
       color: '#007cba',
       isPlaying: false,
     },
     'play-pause': {
       id: `play-pause-button-${widgetInstance.getId()}`,
-      text: 'Play',
-      icon: '▶',
+      text: playText,
+      icon: playIcon,
       action: 'play',
       color: '#007cba',
       isPlaying: false,
     },
     stop: {
       id: `stop-button-${widgetInstance.getId()}`,
-      text: 'Stop',
-      icon: '⏹',
+      text: stopText,
+      icon: stopIcon,
       action: 'stop',
       color: '#e74c3c',
     },
@@ -3404,7 +3523,7 @@ function addAnimationControlButton(widgetInstance, options = {}) {
               data-is-playing="false"
               style="background-color: ${config.color};">
         <span class="button-icon">${config.icon}</span>
-        <span class="button-text">${config.text}</span>
+        <span class="button-text sr-only">${config.text}</span>
       </button>
     `;
     })
@@ -3467,15 +3586,15 @@ function addAnimationControlButton(widgetInstance, options = {}) {
             if (isPlaying) {
               action = 'pause';
               // Update button to show play state
-              this.querySelector('.button-icon').textContent = '▶';
-              this.querySelector('.button-text').textContent = 'Play';
+              this.querySelector('.button-icon').innerHTML = playIcon;
+              this.querySelector('.button-text').textContent = playText;
               this.setAttribute('data-action', 'play');
               this.setAttribute('data-is-playing', 'false');
             } else {
               action = 'play';
               // Update button to show pause state
-              this.querySelector('.button-icon').textContent = '⏸';
-              this.querySelector('.button-text').textContent = 'Pause';
+              this.querySelector('.button-icon').innerHTML = pauseIcon;
+              this.querySelector('.button-text').textContent = pauseText;
               this.setAttribute('data-action', 'pause');
               this.setAttribute('data-is-playing', 'true');
             }
@@ -3520,19 +3639,11 @@ function addAnimationControlButton(widgetInstance, options = {}) {
           }
 
           // Trigger Shiny event if in Shiny mode
-          if (HTMLWidgets.shinyMode) {
-            Shiny.setInputValue(
-              el.id + '_animation_control',
-              {
-                action: action,
-                routeId: targetRouteId,
-                timestamp: new Date().getTime(),
-              },
-              {
-                priority: 'event',
-              }
-            );
-          }
+          updateShiny(el.id + '_animation_control', {
+            action: action,
+            routeId: targetRouteId,
+            timestamp: new Date().getTime(),
+          });
         });
 
         button.addEventListener('mousedown', function (e) {
@@ -3579,18 +3690,18 @@ function addAnimationControlButton(widgetInstance, options = {}) {
     setPlaying: function (isPlaying) {
       // Update play/pause button state externally
       const playPauseButton = document.getElementById(
-        `play-pause-button-${widgetInstance.getId()}`
+        `play-pause-button-${widgetInstance.getId()}`,
       );
       if (playPauseButton) {
         if (isPlaying) {
-          playPauseButton.querySelector('.button-icon').textContent = '⏸';
-          playPauseButton.querySelector('.button-text').textContent = 'Pause';
+          playPauseButton.querySelector('.button-icon').textContent = pauseIcon;
+          playPauseButton.querySelector('.button-text').textContent = pauseText;
           playPauseButton.setAttribute('data-action', 'pause');
           playPauseButton.setAttribute('data-is-playing', 'true');
           playPauseButton.style.backgroundColor = '#f39c12';
         } else {
-          playPauseButton.querySelector('.button-icon').textContent = '▶';
-          playPauseButton.querySelector('.button-text').textContent = 'Play';
+          playPauseButton.querySelector('.button-icon').textContent = playIcon;
+          playPauseButton.querySelector('.button-text').textContent = playText;
           playPauseButton.setAttribute('data-action', 'play');
           playPauseButton.setAttribute('data-is-playing', 'false');
           playPauseButton.style.backgroundColor = '#007cba';
@@ -3642,20 +3753,13 @@ function setupAnimationSpeedControl(widgetInstance, routeId, speedValues, speedL
     }
 
     // Trigger Shiny event if in Shiny mode
-    if (HTMLWidgets.shinyMode) {
-      const el = widgetInstance.getElement();
-      Shiny.setInputValue(
-        el.id + '_animation_speed_changed',
-        {
-          speed: speed,
-          routeId: routeId,
-          timestamp: new Date().getTime(),
-        },
-        {
-          priority: 'event',
-        }
-      );
-    }
+
+    const el = widgetInstance.getElement();
+    updateShiny(el.id + '_animation_speed_changed', {
+      speed: speed,
+      routeId: routeId,
+      timestamp: new Date().getTime(),
+    });
   };
 
   // Set up options for the existing addSpeedControl function
